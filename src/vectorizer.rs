@@ -243,7 +243,7 @@ impl SqliteVector {
 #[derive(Clone)]
 pub struct Vectorizer {
     vector_db: Arc<Mutex<SqliteVector>>,
-    model_name: String,
+    pub model_name: String,
     dimension: usize,
     model: Arc<TextEmbedding>,
 }
@@ -405,19 +405,19 @@ mod tests {
     use super::*;
     #[test]
     fn test_search_docs() {
-        let documents = vec![
-            "passage: Hello, World!",
-            "query: Hello, World!",
-            "passage: This is an example passage.",
-            // You can leave out the prefix but it's recommended
-            "fastembed-rs is licensed under Apache  2.0",
-        ];
+        // let documents = vec![
+        //     "passage: Hello, World!",
+        //     "query: Hello, World!",
+        //     "passage: This is an example passage.",
+        //     // You can leave out the prefix but it's recommended
+        //     "fastembed-rs is licensed under Apache  2.0",
+        // ];
 
-        // let file = File::open("/Users/fyyx/Documents/rust_projects/rust-mcp-demo/laravel-docs_chunks_SZ_400_O_20.jsonl").unwrap();
-        // let reader = io::BufReader::new(file);
-        // let documents: Vec<String> = reader.lines().collect::<Result<_, _>>().unwrap();
-        // let documents = documents.iter().map(|i| i.as_str()).collect::<Vec<&str>>();
-        let mut vector = Vectorizer::new("./test.db3", "laravel_docs", 384).unwrap();
+        let file = File::open("/Users/fyyx/Documents/rust_projects/rust-mcp-demo/artifacts/chunks/docs_chunks_SZ_400_O_20.jsonl").unwrap();
+        let reader = io::BufReader::new(file);
+        let documents: Vec<String> = reader.lines().collect::<Result<_, _>>().unwrap();
+        let documents = documents.iter().map(|i| i.as_str()).collect::<Vec<&str>>();
+        let mut vector = Vectorizer::new("./aa.db3", "laravel_livewire_docs", 384).unwrap();
         vector.clean().unwrap();
         vector.create_table().unwrap();
         vector.store_docs(documents.clone()).unwrap();

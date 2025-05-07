@@ -182,3 +182,14 @@ impl TextChunker {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_save() {
+        let tc = TextChunker::new("/Users/fyyx/Documents/livewire/docs", 400, 20);
+        assert!(tc.run().is_ok());
+    }
+}

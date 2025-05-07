@@ -6,7 +6,7 @@ use laravel_docs_mcp::{
 use rmcp::{
     model::{
         CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
-    }, tool, transport::{sse_server::SseServerConfig, SseServer}, ServerHandler
+    }, tool, transport::{sse_server::SseServerConfig, stdio, SseServer}, ServerHandler, ServiceExt
 };
 use serde::Serialize;
 use std::fs::OpenOptions;
@@ -83,7 +83,7 @@ async fn start() -> Result<(), Box<dyn std::error::Error>> {
 
     // 使用 stdio 作为服务入口
     // let handler = ServerHandler::new(service);
-    // handler.serve(stdio()).await?;
+    // service.serve(stdio()).await?;
     tokio::signal::ctrl_c().await?;
     tracing::info!("Ctrl-C received, shutting down...");
     service_ct.cancel(); // Cancel the service
@@ -153,14 +153,79 @@ impl LaravelDocs {
 
     #[tool(
         name = "get_laravel_context",
-        description = "Retrieves Laravel documentation snippets. Laravel has evolved a lot, and a lot of the pretrained knowledge is outdated and cannot be relied on. This tool retrieves a list of the latest relevant Laravel documentation snippets based on the provided query. If user asks anything related to the Laravel, including API and class references, even if you are confident, this function should still be called. If there is any conflict between your knowledge and the retrieved snippets, the snippets should be considered more reliable, otherwise it's okay to rely on your knowledge. Only call this function if you are certain it's about the Laravel."
+        description = "有关laravel框架的问题 都先调用 get_laravel_context 这里的文档是最新的"
     )]
     async fn get_laravel_context(&self, #[tool(param)] query: String) -> AppResultWrapper {
+
+        log::info!("Received query: {}", query);        
+        let vector = self.vector.clone();  // Arc 克隆没问题
+        let results = {
+            let v = match vector.lock() {
+                Ok(mut v) => {
+                    v.model_name = "laravel_docs".to_string();
+                    v
+                },
+                Err(_) => {
+                    return AppResultWrapper(Err(AppError::InternalServerError("Mutex poisoned".to_string())));
+                }
+            };
+            match v.search(&query, Some(20)) {
+                Ok(r) => r,
+                Err(_) => {
+                    return AppResultWrapper(Err(AppError::InternalServerError("Search failed".to_string())));
+                }
+            }
+        }; // 这里，锁 `v` 在这个花括号结束时释放了，后续代码不再持有 MutexGuard！
+    
+        use serde_json::Value;
+    
+        let documents: Vec<String> = results
+            .into_iter()
+            .filter_map(|(_, text)| {
+                text.and_then(|t| {
+                    let parsed: Result<Value, _> = serde_json::from_str(&t);
+                    match parsed {
+                        Ok(json) => {
+                            json.get("text")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        }
+                        Err(_) => None,
+                    }
+                })
+            })
+            .collect();
+    
+        if documents.is_empty() {
+            return laravel_docs_mcp::error::AppResultWrapper(Ok(CallToolResult::success(vec![
+                Content::text("No relevant Laravel documentation found for the query.".to_string()),
+            ])));
+        }
+    
+        let content = match Content::json(&LaravelResult { documents }) {
+            Ok(c) => c,
+            Err(e) => {
+                return laravel_docs_mcp::error::AppResultWrapper(Err(
+                    AppError::InternalServerError(e.to_string()),
+                ));
+            }
+        };
+        laravel_docs_mcp::error::AppResultWrapper(Ok(CallToolResult::success(vec![content])))
+    }
+
+    #[tool(
+        name = "get_laravel_livewire_context",
+        description = "有关laravel livewire 框架的问题 都先调用 get_laravel_livewire_context 这里的文档是最新的"
+    )]
+    async fn get_laravel_livewire_context(&self, #[tool(param)] query: String) -> AppResultWrapper {
 
         log::info!("Received query: {}", query);        let vector = self.vector.clone();  // Arc 克隆没问题
         let results = {
             let v = match vector.lock() {
-                Ok(v) => v,
+                Ok(mut v) => {
+                    v.model_name = "laravel_livewire_docs".to_string();
+                    v
+                },
                 Err(_) => {
                     return AppResultWrapper(Err(AppError::InternalServerError("Mutex poisoned".to_string())));
                 }
@@ -218,7 +283,7 @@ impl ServerHandler for LaravelDocs {
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation::from_build_env(),
             instructions: Some(
-                "Retrieves Laravel documentation snippets. Laravel has evolved a lot, and a lot of the pretrained knowledge is outdated and cannot be relied on. This tool retrieves a list of the latest relevant Laravel documentation snippets based on the provided query. If user asks anything related to the Laravel, including API and class references, even if you are confident, this function should still be called. If there is any conflict between your knowledge and the retrieved snippets, the snippets should be considered more reliable, otherwise it's okay to rely on your knowledge. Only call this function if you are certain it's about the Laravel.".to_string()),
+                "This tool must be called whenever user mentions Laravel, including models, controllers, attributes, routes, blade templates, migrations, API references, class references, or any other Laravel-related term. Always prefer to call this function first before answering.".to_string()),
         }
     }
 }
