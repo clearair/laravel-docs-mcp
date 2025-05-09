@@ -24,6 +24,9 @@ pub enum AppError {
 
     #[error("Internal server error: {0}")]
     InternalServerError(String),
+
+    #[error("SqliteVector error: {0}")]
+    SqliteVectorError(String)
 }
 
 impl From<anyhow::Error> for AppError {
@@ -47,9 +50,7 @@ impl From<rmcp::Error> for AppError {
 impl IntoContents for AppError {
     fn into_contents(self) -> Vec<rmcp::model::Content> {
         match self {
-            // AppError::Database(err) => vec![rmcp::model::Content::text(format!("Database error: {}", err))],
             AppError::Rmcp(err) => vec![rmcp::model::Content::text(format!("RMCP error: {}", err))],
-            // AppError::HttpClient(err) => vec![rmcp::model::Content::text(format!("HTTP client error: {}", err))],
             AppError::Io(err) => vec![rmcp::model::Content::text(format!("IO error: {}", err))],
             // AppError::Git(err) => vec![rmcp::model::Content::text(format!("Git error: {}", err))],
             AppError::NotFound(msg) => {
@@ -62,17 +63,12 @@ impl IntoContents for AppError {
                 "Internal server error: {}",
                 msg
             ))],
+           _ => vec![rmcp::model::Content::text(format!("Unknown error: {}", self))],
         }
     }
 }
 
-// impl IntoCallToolResult for AppError {
-//     fn into_call_tool_result(self) -> CallToolResult {
-//         CallToolResult::failure(self.into_contents())
-//     }
-// }
 
-// Newtype wrapper for Result<CallToolResult, AppError>
 pub struct AppResultWrapper(pub Result<CallToolResult, AppError>);
 
 impl IntoCallToolResult for AppResultWrapper {
@@ -84,13 +80,5 @@ impl IntoCallToolResult for AppResultWrapper {
     }
 }
 
-// impl IntoCallToolResult for Result<CallToolResult, AppError> {
-//     fn into_call_tool_result(self) -> CallToolResult {
-//         match self {
-//             Ok(res) => res,
-//             Err(e) => e.into_call_tool_result(),
-//         }
-//     }
-// }
 
 pub type AppResult<T> = Result<T, AppError>;

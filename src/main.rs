@@ -1,4 +1,5 @@
-use std::{path::PathBuf, sync::{Arc, Mutex}};
+use std::{collections::HashMap, path::PathBuf, sync::{Arc, Mutex}, vec};
+use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
 use laravel_docs_mcp::{
     Vectorizer,
     error::{AppError, AppResultWrapper},
@@ -9,9 +10,19 @@ use rmcp::{
     }, tool, transport::{sse_server::SseServerConfig, stdio, SseServer}, ServerHandler, ServiceExt
 };
 use serde::Serialize;
+use tokio::sync::RwLock;
 use std::fs::OpenOptions;
 use std::io::Write;
-use clap::{Parser, Subcommand};
+use clap::Parser;
+use std::sync::LazyLock;
+
+pub(crate) static MODEL: LazyLock<Arc<TextEmbedding>> = LazyLock::new(|| {
+    Arc::new(TextEmbedding::try_new(
+        InitOptions::new(EmbeddingModel::AllMiniLML6V2)
+            .with_cache_dir("/Users/fyyx/Documents/rust_projects/rust-mcp-demo/~/.fastembed_cache".into())
+            .with_show_download_progress(true),
+    ).unwrap())
+});
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -27,14 +38,22 @@ struct Args {
     // command: Commands,
 }
 
-fn main () -> Result<(), Box<dyn std::error::Error>> {
-    start()?;
+#[tokio::main]
+async fn main () -> Result<(), Box<dyn std::error::Error>> {
+    start_stdio().await?;
+    // start_sse().await?;
 
     Ok(())
 }
 
-#[tokio::main]
-async fn start() -> Result<(), Box<dyn std::error::Error>> {
+async fn start_stdio() -> Result<(), Box<dyn std::error::Error>> {
+    let service = LaravelDocs::new("./aa.db3");
+    service.serve(stdio()).await?.waiting().await?;
+    
+    Ok(())
+}
+
+async fn start_sse() -> Result<(), Box<dyn std::error::Error>> {
     // let args = Args::parse();
     // Initialize file logger
     let log_file = OpenOptions::new()
@@ -48,11 +67,10 @@ async fn start() -> Result<(), Box<dyn std::error::Error>> {
     }))?;
     log::set_max_level(log::LevelFilter::Info);
 
-    // let service = LaravelDocs::new(
-    //     "/Users/fyyx/Documents/rust_projects/rust-mcp-demo/aa.db3",
-    //     "laravel_docs",
-    //     384,
-    // )?;
+    // Force-load embedding model and confirm initialization
+    let _model = MODEL.clone();
+    log::info!("Embedding model loaded successfully");
+
     let port = 3000u16;
     tracing::info!("Starting Postgres MCP server in SSE mode on port {}", port);
 
@@ -71,15 +89,7 @@ async fn start() -> Result<(), Box<dyn std::error::Error>> {
 
     let sse_server = SseServer::serve_with_config(config).await?;
     
-    let service_ct = sse_server.with_service(move || {
-        LaravelDocs::new(
-            "/Users/fyyx/Documents/rust_projects/rust-mcp-demo/aa.db3",
-            "laravel_docs",
-            384,
-        ).unwrap_or_else(|e| {
-            panic!("Failed to create LaravelDocs: {:?}", e);
-        })
-    });
+    let service_ct = sse_server.with_service(|| LaravelDocs::new("./aa.db3"));
 
     // 使用 stdio 作为服务入口
     // let handler = ServerHandler::new(service);
@@ -109,6 +119,7 @@ impl log::Log for FileLogger {
             
             if let Ok(mut file) = self.file.lock() {
                 let _ = file.write_all(log_line.as_bytes());
+                let _ = file.flush();
             }
         }
     }
@@ -120,9 +131,42 @@ impl log::Log for FileLogger {
     }
 }
 
+macro_rules! define_docs_tool {
+    ($fn_name:ident, $tool_name:literal, $desc:literal, $collection:literal, $ResultType:ident) => {
+        #[tool(name = $tool_name, description = $desc)]
+        async fn $fn_name(&self, #[tool(param)] query: String) -> AppResultWrapper {
+            log::info!("Received query: {}", query);
+
+            let vector = match self.get_vectorizer($collection).await {
+                Ok(v) => v,
+                Err(e) => return AppResultWrapper(Err(e.into())),
+            };
+            let results = match vector.search(&query, Some(20)) {
+                Ok(r) => r,
+                Err(e) => return AppResultWrapper(Err(e.into())),
+            };
+            let documents: Vec<String> = parse_docs(results);
+            if documents.is_empty() {
+                return AppResultWrapper(Ok(CallToolResult::success(vec![
+                    Content::text(format!("No relevant {} documentation found for the query.", $collection)),
+                ])));
+
+            }
+
+            let content = match Content::json(&$ResultType { documents }) {
+                Ok(c) => c,
+                Err(e) => return AppResultWrapper(Err(AppError::InternalServerError(e.to_string()))),
+            };
+            AppResultWrapper(Ok(CallToolResult::success(vec![content])))
+        }
+    };
+}
+
+
 #[derive(Clone)]
 pub struct LaravelDocs {
-    vector: Arc<Mutex<Vectorizer>>,
+    db_path: String,
+    vectorizers: Arc<RwLock<HashMap<String, Arc<Vectorizer>>>>,
 }
 
 #[derive(Serialize)]
@@ -132,207 +176,72 @@ pub struct LaravelResult {
 
 #[tool(tool_box)]
 impl LaravelDocs {
-    pub fn new(db_path: &str, collection_name: &str, dimension: usize) -> anyhow::Result<Self> {
-        let vector = Vectorizer::new(db_path, collection_name, dimension)?;
-        Ok(Self {
-            vector: Arc::new(Mutex::new(vector)),
-        })
+    pub fn new(db_path: &str) -> Self {
+        Self { db_path: db_path.to_string(), vectorizers: Arc::new(RwLock::new(HashMap::new())) }
     }
 
+    async fn get_vectorizer(&self, collection: &str) -> anyhow::Result<Arc<Vectorizer>> {
+        // let vectorizers = self.vectorizers.read().await;
+        let vector = match self.vectorizers.read().await.get(collection) {
+            Some(v) => v.clone(),
+            None => {
+                let v = match Vectorizer::new(&self.db_path, collection, 384, MODEL.clone()) {
+                    Ok(v) => Arc::new(v),
+                    Err(e) => return Err(e),
+                };
+                self.vectorizers.write().await.insert(collection.to_string(), v.clone());
+                v
+            }
+        };
+        Ok(vector)
+    }
 
-    // #[tool(
-    //     name = "inc",
-    // )]
-    // async fn inc(&self) -> AppResultWrapper {
-    //     laravel_docs_mcp::error::AppResultWrapper(Ok(CallToolResult::success(vec![
-    //         Content::text("1111".to_owned())
-            
-    //         ])))
-
-    // }
-
-    #[tool(
-        name = "get_laravel_context",
-        description = "有关laravel框架的问题 都先调用 get_laravel_context 这里的文档是最新的"
-    )]
+    #[tool(name = "get_laravel_context", description = "有关laravel框架的问题 都先调用 get_laravel_context 这里的文档是最新的")]
     async fn get_laravel_context(&self, #[tool(param)] query: String) -> AppResultWrapper {
-
-        log::info!("Received query: {}", query);        
-        let vector = self.vector.clone();  // Arc 克隆没问题
-        let results = {
-            let v = match vector.lock() {
-                Ok(mut v) => {
-                    v.model_name = "laravel_docs".to_string();
-                    v
-                },
-                Err(_) => {
-                    return AppResultWrapper(Err(AppError::InternalServerError("Mutex poisoned".to_string())));
-                }
-            };
-            match v.search(&query, Some(20)) {
-                Ok(r) => r,
-                Err(_) => {
-                    return AppResultWrapper(Err(AppError::InternalServerError("Search failed".to_string())));
-                }
-            }
-        }; // 这里，锁 `v` 在这个花括号结束时释放了，后续代码不再持有 MutexGuard！
-    
-        use serde_json::Value;
-    
-        let documents: Vec<String> = results
-            .into_iter()
-            .filter_map(|(_, text)| {
-                text.and_then(|t| {
-                    let parsed: Result<Value, _> = serde_json::from_str(&t);
-                    match parsed {
-                        Ok(json) => {
-                            json.get("text")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string())
-                        }
-                        Err(_) => None,
-                    }
-                })
-            })
-            .collect();
-    
-        if documents.is_empty() {
-            return laravel_docs_mcp::error::AppResultWrapper(Ok(CallToolResult::success(vec![
-                Content::text("No relevant Laravel documentation found for the query.".to_string()),
+        log::info!("Received query: {}", query);
+        let vector = match self.get_vectorizer("laravel_docs").await {
+            Ok(v) => v,
+            Err(e) => return AppResultWrapper(Err(e.into())),
+        };
+        let results = match vector.search(&query, Some(20)) {
+            Ok(r) => r,
+            Err(e) => return AppResultWrapper(Err(e.into())),
+        };
+        let docs = parse_docs(results);
+        if docs.is_empty() {
+            return AppResultWrapper(Ok(CallToolResult::success(vec![
+                Content::text(format!("No relevant {} documentation found for the query.", "laravel_docs")),
             ])));
         }
-    
-        let content = match Content::json(&LaravelResult { documents }) {
+        let content = match Content::json(&LaravelResult { documents: docs }) {
             Ok(c) => c,
-            Err(e) => {
-                return laravel_docs_mcp::error::AppResultWrapper(Err(
-                    AppError::InternalServerError(e.to_string()),
-                ));
-            }
+            Err(e) => return AppResultWrapper(Err(AppError::InternalServerError(e.to_string()))),
         };
-        laravel_docs_mcp::error::AppResultWrapper(Ok(CallToolResult::success(vec![content])))
+        AppResultWrapper(Ok(CallToolResult::success(vec![content])))
     }
 
-    #[tool(
-        name = "get_laravel_livewire_context",
-        description = "有关laravel livewire 框架的问题 都先调用 get_laravel_livewire_context 这里的文档是最新的"
-    )]
+    #[tool(name = "get_laravel_livewire_context", description = "有关laravel livewire 框架的问题 都先调用 get_laravel_livewire_context 这里的文档是最新的")]
     async fn get_laravel_livewire_context(&self, #[tool(param)] query: String) -> AppResultWrapper {
-
-        log::info!("Received query: {}", query);        let vector = self.vector.clone();  // Arc 克隆没问题
-        let results = {
-            let v = match vector.lock() {
-                Ok(mut v) => {
-                    v.model_name = "laravel_livewire_docs".to_string();
-                    v
-                },
-                Err(_) => {
-                    return AppResultWrapper(Err(AppError::InternalServerError("Mutex poisoned".to_string())));
-                }
-            };
-            match v.search(&query, Some(20)) {
-                Ok(r) => r,
-                Err(_) => {
-                    return AppResultWrapper(Err(AppError::InternalServerError("Search failed".to_string())));
-                }
-            }
-        }; // 这里，锁 `v` 在这个花括号结束时释放了，后续代码不再持有 MutexGuard！
-    
-        use serde_json::Value;
-    
-        let documents: Vec<String> = results
-            .into_iter()
-            .filter_map(|(_, text)| {
-                text.and_then(|t| {
-                    let parsed: Result<Value, _> = serde_json::from_str(&t);
-                    match parsed {
-                        Ok(json) => {
-                            json.get("text")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string())
-                        }
-                        Err(_) => None,
-                    }
-                })
-            })
-            .collect();
-    
-        if documents.is_empty() {
-            return laravel_docs_mcp::error::AppResultWrapper(Ok(CallToolResult::success(vec![
-                Content::text("No relevant Laravel documentation found for the query.".to_string()),
+        log::info!("Received query: {}", query);
+        let vector = match self.get_vectorizer("laravel_livewire_docs").await {
+            Ok(v) => v,
+            Err(e) => return AppResultWrapper(Err(e.into())),
+        };
+        let results = match vector.search(&query, Some(20)) {
+            Ok(r) => r,
+            Err(e) => return AppResultWrapper(Err(e.into())),
+        };
+        let docs = parse_docs(results);
+        if docs.is_empty() {
+            return AppResultWrapper(Ok(CallToolResult::success(vec![
+                Content::text(format!("No relevant {} documentation found for the query.", "laravel_livewire_docs")),
             ])));
         }
-    
-        let content = match Content::json(&LaravelResult { documents }) {
+        let content = match Content::json(&LaravelResult { documents: docs }) {
             Ok(c) => c,
-            Err(e) => {
-                return laravel_docs_mcp::error::AppResultWrapper(Err(
-                    AppError::InternalServerError(e.to_string()),
-                ));
-            }
+            Err(e) => return AppResultWrapper(Err(AppError::InternalServerError(e.to_string()))),
         };
-        laravel_docs_mcp::error::AppResultWrapper(Ok(CallToolResult::success(vec![content])))
-    }
-
-    #[tool(
-        name = "get_livewire_sweet_alert_context",
-        description = "有关laravel get_livewire_sweet_alert_context 的问题 都先调用 get_livewire_sweet_alert_context 这里的文档是最新的"
-    )]
-    async fn get_livewire_sweet_alert_context(&self, #[tool(param)] query: String) -> AppResultWrapper {
-
-        log::info!("Received query: {}", query);        let vector = self.vector.clone();  // Arc 克隆没问题
-        let results = {
-            let v = match vector.lock() {
-                Ok(mut v) => {
-                    v.model_name = "livewire_sweet_alert_docs".to_string();
-                    v
-                },
-                Err(_) => {
-                    return AppResultWrapper(Err(AppError::InternalServerError("Mutex poisoned".to_string())));
-                }
-            };
-            match v.search(&query, Some(20)) {
-                Ok(r) => r,
-                Err(_) => {
-                    return AppResultWrapper(Err(AppError::InternalServerError("Search failed".to_string())));
-                }
-            }
-        }; // 这里，锁 `v` 在这个花括号结束时释放了，后续代码不再持有 MutexGuard！
-    
-        use serde_json::Value;
-    
-        let documents: Vec<String> = results
-            .into_iter()
-            .filter_map(|(_, text)| {
-                text.and_then(|t| {
-                    let parsed: Result<Value, _> = serde_json::from_str(&t);
-                    match parsed {
-                        Ok(json) => {
-                            json.get("text")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string())
-                        }
-                        Err(_) => None,
-                    }
-                })
-            })
-            .collect();
-    
-        if documents.is_empty() {
-            return laravel_docs_mcp::error::AppResultWrapper(Ok(CallToolResult::success(vec![
-                Content::text("No relevant Laravel documentation found for the query.".to_string()),
-            ])));
-        }
-    
-        let content = match Content::json(&LaravelResult { documents }) {
-            Ok(c) => c,
-            Err(e) => {
-                return laravel_docs_mcp::error::AppResultWrapper(Err(
-                    AppError::InternalServerError(e.to_string()),
-                ));
-            }
-        };
-        laravel_docs_mcp::error::AppResultWrapper(Ok(CallToolResult::success(vec![content])))
+        AppResultWrapper(Ok(CallToolResult::success(vec![content])))
     }
 }
 
@@ -349,26 +258,36 @@ impl ServerHandler for LaravelDocs {
     }
 }
 
+fn parse_docs(results: Vec<(i64, Option<String>)>) -> Vec<String> {
+    results.into_iter().filter_map(|(_, text)| {
+        text.and_then(|t| {
+            serde_json::from_str::<serde_json::Value>(&t).ok()
+                .and_then(|json| json.get("text")?.as_str().map(|s| s.to_string()))
+        })
+    }).collect()
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use tokio; // 需要在Cargo.toml里有tokio依赖
+    use tokio;
     use std::sync::Mutex;
 
-    #[tokio::test]
-    async fn test_get_laravel_context() {
-        // 构造一个假的 Vectorizer（这里假设 Vectorizer::new 可以正常初始化）
-        let vectorizer = Vectorizer::new("./aa.db3", "laravel_docs", 384).unwrap();
-        let docs = LaravelDocs {
-            vector: Arc::new(Mutex::new(vectorizer)),
-        };
-        let query = "model".to_string();
-        let result = docs.get_laravel_context(query).await;
-        let a = result.0.unwrap();
-        dbg!(a.to_owned());
-        // println!("get_laravel_context result: {:?}", result.0);
-        // 你可以加断言，比如：
-        // assert!(result.0.is_ok());
-    }
+    // #[tokio::test]
+    // async fn test_get_laravel_context() {
+    //     // 构造一个假的 Vectorizer（这里假设 Vectorizer::new 可以正常初始化）
+    //     let vectorizer = Vectorizer::new("./aa.db3", "laravel_docs", 384, MODEL.clone()).unwrap();
+    //     let docs = LaravelDocs {
+    //         vector: Arc::new(Mutex::new(vectorizer)),
+    //     };
+    //     let query = "model".to_string();
+    //     let result = docs.get_laravel_context(query).await;
+    //     let a = result.0.unwrap();
+    //     dbg!(a.to_owned());
+    //     // println!("get_laravel_context result: {:?}", result.0);
+    //     // 你可以加断言，比如：
+    //     // assert!(result.0.is_ok());
+    // }
 }

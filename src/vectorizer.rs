@@ -1,49 +1,23 @@
 use anyhow::{Result, anyhow};
 use bytemuck::cast_slice;
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use fastembed::TextEmbedding;
 use rusqlite::{Connection, ffi::sqlite3_auto_extension, params};
-use serde::{Deserialize, Serialize};
 use std::{
     path::Path,
     sync::{Arc, Mutex},
 };
 
-/// Metric type for vector similarity
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub enum Metric {
-    Cosine,
-    Dot,
-    Euclidean,
-}
-
-impl Metric {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Metric::Cosine => "cosine",
-            Metric::Dot => "dot",
-            Metric::Euclidean => "euclidean",
-        }
-    }
-}
-
-/// Parameters for vector collection
 pub struct VectorParams {
     dimension: u32,
-    metric: Metric,
 }
 
 impl VectorParams {
     pub fn new(dimension: u32) -> Self {
         Self {
             dimension,
-            metric: Metric::Cosine,
         }
     }
 
-    pub fn with_metric(mut self, metric: Metric) -> Self {
-        self.metric = metric;
-        self
-    }
 }
 
 /// Vectorizer for text embedding using sqlite-vec
@@ -127,13 +101,10 @@ impl SqliteVector {
         embedding: &[f32],
         limit: u32,
     ) -> Result<Vec<(i64, Option<String>)>> {
-        // Convert embedding to JSON string for search
-        // let embedding_json = serde_json::to_string(embedding)?;
+
 
         let meta_table = format!("{}_metadata", collection);
 
-        // Join with metadata table to get the stored text
-        // The correct syntax for searching in a vec0 table uses the MATCH operator with k=? constraint
         let sql = format!(
             "SELECT v.rowid, m.metadata
              FROM {} v
@@ -243,7 +214,7 @@ impl SqliteVector {
 #[derive(Clone)]
 pub struct Vectorizer {
     vector_db: Arc<Mutex<SqliteVector>>,
-    pub model_name: String,
+    collection: String,
     dimension: usize,
     model: Arc<TextEmbedding>,
 }
@@ -251,39 +222,26 @@ const CHUNK_SIZE: usize = 500;
 
 impl Vectorizer {
     /// Creates a new Vectorizer with the specified database path
-    pub fn new<P: AsRef<Path>>(db_path: P, model_name: &str, dimension: usize) -> Result<Self> {
-        let model: TextEmbedding = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::AllMiniLML6V2)
-                .with_cache_dir("~/.fastembed_cache".into())
-                .with_show_download_progress(true),
-        )?;
-        // let model_path = "/Users/fyyx/Documents/rust_projects/rust-mcp-demo/.fastembed_cache/model.onnx";
-        // // let options = InitOptions::new(EmbeddingModel::Custom(model_path));
-        // let model: TextEmbedding = TextEmbedding::try_new(
-        //      InitOptions::new(EmbeddingModel::AllMiniLML6V2)
-        // )?;
-        // Create or open the vector database
+    pub fn new<P: AsRef<Path>>(db_path: P, collection: &str, dimension: usize, model: Arc<TextEmbedding>) -> Result<Self> {
         let vector_db = SqliteVector::new(db_path)
             .map_err(|e| anyhow!("Failed to create/open vector database: {}", e))?;
 
-        // Self::clean(model_name, &vector_db)?;
-        // Create the collection if it doesn't exist
         Ok(Self {
             vector_db: Arc::new(Mutex::new(vector_db)),
-            model_name: model_name.to_string(),
+            collection: collection.to_string(),
             dimension,
-            model: Arc::new(model),
+            model: model,
         })
     }
 
     pub fn create_table(&self) -> Result<()> {
-        let params = VectorParams::new(self.dimension as u32).with_metric(Metric::Cosine);
+        let params = VectorParams::new(self.dimension as u32);
 
         let v = self
             .vector_db
             .lock()
             .map_err(|_| anyhow!("Mutex poisoned"))?;
-        v.create_vector_collection(&self.model_name, params)
+        v.create_vector_collection(&self.collection, params)
             .map_err(|e| anyhow!("Failed to create vector collection: {}", e))?;
         Ok(())
     }
@@ -296,11 +254,11 @@ impl Vectorizer {
             .lock()
             .map_err(|_| anyhow!("Mutex poisoned"))?;
 
-        vd.add_item(&self.model_name, embedding)
+        vd.add_item(&self.collection, embedding)
             .map_err(|e| anyhow!("Failed to add embedding: {}", e))?;
 
         // Store the text as metadata
-        vd.add_mate(&self.model_name, id, text)
+        vd.add_mate(&self.collection, id, text)
             .map_err(|e| anyhow!("Failed to set metadata: {}", e))?;
 
         Ok(())
@@ -321,8 +279,8 @@ impl Vectorizer {
                 .vector_db
                 .lock()
                 .map_err(|_| anyhow!("Mutex poisoned"))?;
-            vd.add_items(&self.model_name, items)?;
-            vd.add_mates(&self.model_name, mates)?;
+            vd.add_items(&self.collection, items)?;
+            vd.add_mates(&self.collection, mates)?;
         }
         Ok(())
     }
@@ -350,14 +308,14 @@ impl Vectorizer {
             .map_err(|_| anyhow!("Mutex poisoned"))?;
 
         let results = vd
-            .search(&self.model_name, embedding, limit)
+            .search(&self.collection, embedding, limit)
             .map_err(|e| anyhow!("Failed to search: {}", e))?;
 
         Ok(results)
     }
 
     pub fn clean(&self) -> Result<()> {
-        let main_table = &self.model_name;
+        let main_table = &self.collection;
         let meta_table = format!("{}_metadata", main_table);
         let sql_main = format!("DROP TABLE IF EXISTS {}", main_table);
         let sql_meta = format!("DROP TABLE IF EXISTS {}", meta_table);
@@ -371,13 +329,9 @@ impl Vectorizer {
         Ok(())
     }
 
-    /// Generates a simple mock embedding for demonstration purposes
-    /// In a real implementation, this would use a proper embedding model
-    pub fn mock_embed(&self, text: &str) -> Vec<f32> {
-        // This is just a mock implementation for demonstration
-        // In a real system, you would use a proper embedding model
 
-        // Create a deterministic but simple embedding based on character values
+    pub fn mock_embed(&self, text: &str) -> Vec<f32> {
+
         let mut embedding = vec![0.0; self.dimension];
 
         for (i, c) in text.chars().enumerate() {
@@ -402,35 +356,40 @@ mod tests {
     use std::fs::File;
     use std::io::{self, BufRead};
 
+    use fastembed::{EmbeddingModel, InitOptions};
+
     use super::*;
     #[test]
     fn test_search_docs() {
-        // let documents = vec![
-        //     "passage: Hello, World!",
-        //     "query: Hello, World!",
-        //     "passage: This is an example passage.",
-        //     // You can leave out the prefix but it's recommended
-        //     "fastembed-rs is licensed under Apache  2.0",
-        // ];
+        let documents = vec![
+            "passage: Hello, World!",
+            "query: Hello, World!",
+            "passage: This is an example passage.",
+            "fastembed-rs is licensed under Apache  2.0",
+        ];
 
-        let file = File::open("/Users/fyyx/Documents/rust_projects/rust-mcp-demo/artifacts/chunks/docs_chunks_SZ_400_O_20.jsonl").unwrap();
-        let reader = io::BufReader::new(file);
-        let documents: Vec<String> = reader.lines().collect::<Result<_, _>>().unwrap();
-        let documents = documents.iter().map(|i| i.as_str()).collect::<Vec<&str>>();
-        let mut vector = Vectorizer::new("./aa.db3", "livewire_sweet_alert_docs", 384).unwrap();
+        // let file = File::open("/Users/fyyx/Documents/rust_projects/rust-mcp-demo/artifacts/chunks/docs_chunks_SZ_400_O_20.jsonl").unwrap();
+        // let reader = io::BufReader::new(file);
+        // let documents: Vec<String> = reader.lines().collect::<Result<_, _>>().unwrap();
+        // let documents = documents.iter().map(|i| i.as_str()).collect::<Vec<&str>>();
+        let model = Arc::new(TextEmbedding::try_new(
+            InitOptions::new(EmbeddingModel::AllMiniLML6V2)
+                .with_cache_dir("~/.fastembed_cache".into())
+                .with_show_download_progress(true),
+        ).unwrap());
+        let mut vector = Vectorizer::new("./test.db3", "test_docs", 384, model).unwrap();
         vector.clean().unwrap();
         vector.create_table().unwrap();
         vector.store_docs(documents.clone()).unwrap();
         let result: Vec<(i64, Option<String>)> =
             vector.search(documents.first().unwrap(), None).unwrap();
 
-        dbg!(result);
-        // assert_eq!(
-        //     result
-        //         .iter()
-        //         .map(|(_, doc)| doc.as_deref().unwrap_or(""))
-        //         .collect::<Vec<&str>>(),
-        //     documents
-        // );
+        assert_eq!(
+            result
+                .iter()
+                .map(|(_, doc)| doc.as_deref().unwrap_or(""))
+                .collect::<Vec<&str>>(),
+            documents
+        );
     }
 }
