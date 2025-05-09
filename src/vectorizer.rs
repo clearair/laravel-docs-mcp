@@ -417,7 +417,7 @@ mod tests {
         let reader = io::BufReader::new(file);
         let documents: Vec<String> = reader.lines().collect::<Result<_, _>>().unwrap();
         let documents = documents.iter().map(|i| i.as_str()).collect::<Vec<&str>>();
-        let mut vector = Vectorizer::new("./aa.db3", "laravel_livewire_docs", 384).unwrap();
+        let mut vector = Vectorizer::new("./aa.db3", "livewire_sweet_alert_docs", 384).unwrap();
         vector.clean().unwrap();
         vector.create_table().unwrap();
         vector.store_docs(documents.clone()).unwrap();

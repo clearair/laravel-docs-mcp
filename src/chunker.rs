@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn test_save() {
-        let tc = TextChunker::new("/Users/fyyx/Documents/livewire/docs", 400, 20);
+        let tc = TextChunker::new("/Users/fyyx/Documents/sweet-alert/docs", 400, 20);
         assert!(tc.run().is_ok());
     }
 }

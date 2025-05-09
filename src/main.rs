@@ -273,6 +273,67 @@ impl LaravelDocs {
         };
         laravel_docs_mcp::error::AppResultWrapper(Ok(CallToolResult::success(vec![content])))
     }
+
+    #[tool(
+        name = "get_livewire_sweet_alert_context",
+        description = "有关laravel get_livewire_sweet_alert_context 的问题 都先调用 get_livewire_sweet_alert_context 这里的文档是最新的"
+    )]
+    async fn get_livewire_sweet_alert_context(&self, #[tool(param)] query: String) -> AppResultWrapper {
+
+        log::info!("Received query: {}", query);        let vector = self.vector.clone();  // Arc 克隆没问题
+        let results = {
+            let v = match vector.lock() {
+                Ok(mut v) => {
+                    v.model_name = "livewire_sweet_alert_docs".to_string();
+                    v
+                },
+                Err(_) => {
+                    return AppResultWrapper(Err(AppError::InternalServerError("Mutex poisoned".to_string())));
+                }
+            };
+            match v.search(&query, Some(20)) {
+                Ok(r) => r,
+                Err(_) => {
+                    return AppResultWrapper(Err(AppError::InternalServerError("Search failed".to_string())));
+                }
+            }
+        }; // 这里，锁 `v` 在这个花括号结束时释放了，后续代码不再持有 MutexGuard！
+    
+        use serde_json::Value;
+    
+        let documents: Vec<String> = results
+            .into_iter()
+            .filter_map(|(_, text)| {
+                text.and_then(|t| {
+                    let parsed: Result<Value, _> = serde_json::from_str(&t);
+                    match parsed {
+                        Ok(json) => {
+                            json.get("text")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        }
+                        Err(_) => None,
+                    }
+                })
+            })
+            .collect();
+    
+        if documents.is_empty() {
+            return laravel_docs_mcp::error::AppResultWrapper(Ok(CallToolResult::success(vec![
+                Content::text("No relevant Laravel documentation found for the query.".to_string()),
+            ])));
+        }
+    
+        let content = match Content::json(&LaravelResult { documents }) {
+            Ok(c) => c,
+            Err(e) => {
+                return laravel_docs_mcp::error::AppResultWrapper(Err(
+                    AppError::InternalServerError(e.to_string()),
+                ));
+            }
+        };
+        laravel_docs_mcp::error::AppResultWrapper(Ok(CallToolResult::success(vec![content])))
+    }
 }
 
 #[tool(tool_box)]
