@@ -26,7 +26,7 @@ pub enum AppError {
     InternalServerError(String),
 
     #[error("SqliteVector error: {0}")]
-    SqliteVectorError(String)
+    SqliteVectorError(String),
 }
 
 impl From<anyhow::Error> for AppError {
@@ -63,11 +63,13 @@ impl IntoContents for AppError {
                 "Internal server error: {}",
                 msg
             ))],
-           _ => vec![rmcp::model::Content::text(format!("Unknown error: {}", self))],
+            _ => vec![rmcp::model::Content::text(format!(
+                "Unknown error: {}",
+                self
+            ))],
         }
     }
 }
-
 
 pub struct AppResultWrapper(pub Result<CallToolResult, AppError>);
 
@@ -79,6 +81,5 @@ impl IntoCallToolResult for AppResultWrapper {
         }
     }
 }
-
 
 pub type AppResult<T> = Result<T, AppError>;

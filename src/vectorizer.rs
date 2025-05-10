@@ -13,11 +13,8 @@ pub struct VectorParams {
 
 impl VectorParams {
     pub fn new(dimension: u32) -> Self {
-        Self {
-            dimension,
-        }
+        Self { dimension }
     }
-
 }
 
 /// Vectorizer for text embedding using sqlite-vec
@@ -101,8 +98,6 @@ impl SqliteVector {
         embedding: &[f32],
         limit: u32,
     ) -> Result<Vec<(i64, Option<String>)>> {
-
-
         let meta_table = format!("{}_metadata", collection);
 
         let sql = format!(
@@ -222,7 +217,12 @@ const CHUNK_SIZE: usize = 500;
 
 impl Vectorizer {
     /// Creates a new Vectorizer with the specified database path
-    pub fn new<P: AsRef<Path>>(db_path: P, collection: &str, dimension: usize, model: Arc<TextEmbedding>) -> Result<Self> {
+    pub fn new<P: AsRef<Path>>(
+        db_path: P,
+        collection: &str,
+        dimension: usize,
+        model: Arc<TextEmbedding>,
+    ) -> Result<Self> {
         let vector_db = SqliteVector::new(db_path)
             .map_err(|e| anyhow!("Failed to create/open vector database: {}", e))?;
 
@@ -329,9 +329,7 @@ impl Vectorizer {
         Ok(())
     }
 
-
     pub fn mock_embed(&self, text: &str) -> Vec<f32> {
-
         let mut embedding = vec![0.0; self.dimension];
 
         for (i, c) in text.chars().enumerate() {
@@ -368,16 +366,19 @@ mod tests {
             "fastembed-rs is licensed under Apache  2.0",
         ];
 
-        // let file = File::open("/Users/fyyx/Documents/rust_projects/rust-mcp-demo/artifacts/chunks/docs_chunks_SZ_400_O_20.jsonl").unwrap();
-        // let reader = io::BufReader::new(file);
-        // let documents: Vec<String> = reader.lines().collect::<Result<_, _>>().unwrap();
-        // let documents = documents.iter().map(|i| i.as_str()).collect::<Vec<&str>>();
-        let model = Arc::new(TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::AllMiniLML6V2)
-                .with_cache_dir("~/.fastembed_cache".into())
-                .with_show_download_progress(true),
-        ).unwrap());
-        let mut vector = Vectorizer::new("./test.db3", "test_docs", 384, model).unwrap();
+        let file = File::open("/Users/fyyx/Documents/rust_projects/rust-mcp-demo/artifacts/chunks/docs_chunks_SZ_400_O_20.jsonl").unwrap();
+        let reader = io::BufReader::new(file);
+        let documents: Vec<String> = reader.lines().collect::<Result<_, _>>().unwrap();
+        let documents = documents.iter().map(|i| i.as_str()).collect::<Vec<&str>>();
+        let model = Arc::new(
+            TextEmbedding::try_new(
+                InitOptions::new(EmbeddingModel::AllMiniLML6V2)
+                    .with_cache_dir("~/.fastembed_cache".into())
+                    .with_show_download_progress(true),
+            )
+            .unwrap(),
+        );
+        let mut vector = Vectorizer::new("./aa.db3", "pingora_docs", 384, model).unwrap();
         vector.clean().unwrap();
         vector.create_table().unwrap();
         vector.store_docs(documents.clone()).unwrap();

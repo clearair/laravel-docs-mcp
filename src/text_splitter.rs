@@ -110,8 +110,15 @@ impl RecursiveCharacterTextSplitter {
                 // Start new chunk with overlap from previous chunk if possible
                 if self.chunk_overlap > 0 && !chunks.is_empty() {
                     let last_chunk = chunks.last().unwrap();
-                    let overlap_start = last_chunk.len().saturating_sub(self.chunk_overlap);
-                    current_chunk = last_chunk[overlap_start..].to_string();
+                    let overlap_chars = self.chunk_overlap;
+                    let char_indices: Vec<_> = last_chunk.char_indices().collect();
+                    let overlap_start_char = char_indices.len().saturating_sub(overlap_chars);
+                    let overlap_start_byte = if overlap_start_char < char_indices.len() {
+                        char_indices[overlap_start_char].0
+                    } else {
+                        0
+                    };
+                    current_chunk = last_chunk[overlap_start_byte..].to_string();
                 } else {
                     current_chunk = String::new();
                 }
@@ -166,8 +173,15 @@ impl RecursiveCharacterTextSplitter {
                 // Start new chunk with overlap from previous chunk if possible
                 if self.chunk_overlap > 0 && !chunks.is_empty() {
                     let last_chunk = chunks.last().unwrap();
-                    let overlap_start = last_chunk.len().saturating_sub(self.chunk_overlap);
-                    current_chunk = last_chunk[overlap_start..].to_string();
+                    let overlap_chars = self.chunk_overlap;
+                    let char_indices: Vec<_> = last_chunk.char_indices().collect();
+                    let overlap_start_char = char_indices.len().saturating_sub(overlap_chars);
+                    let overlap_start_byte = if overlap_start_char < char_indices.len() {
+                        char_indices[overlap_start_char].0
+                    } else {
+                        0
+                    };
+                    current_chunk = last_chunk[overlap_start_byte..].to_string();
                 } else {
                     current_chunk = String::new();
                 }

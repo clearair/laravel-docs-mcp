@@ -1,30 +1,43 @@
-use std::{collections::HashMap, path::{Path, PathBuf}, sync::{Arc, Mutex}, vec};
-use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
+use clap::{Parser, Subcommand};
+use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use laravel_docs_mcp::{
     Vectorizer,
     error::{AppError, AppResultWrapper},
 };
 use rmcp::{
+    ServerHandler, ServiceExt,
     model::{
         CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
-    }, tool, transport::{sse_server::SseServerConfig, stdio, SseServer}, ServerHandler, ServiceExt
+    },
+    tool,
+    transport::{SseServer, sse_server::SseServerConfig, stdio},
 };
 use serde::Serialize;
-use tokio::sync::RwLock;
 use std::fs::OpenOptions;
 use std::io::Write;
-use clap::{Parser, Subcommand};
 use std::sync::LazyLock;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    vec,
+};
+use tokio::sync::RwLock;
 
 pub(crate) static MODEL: LazyLock<Arc<TextEmbedding>> = LazyLock::new(|| {
     let arg = Args::parse();
-    let model_path = arg.model_path.unwrap_or_else(|| format!("{}/.fastembed_cache", std::env::var("HOME").unwrap()).into());
+    let model_path = arg
+        .model_path
+        .unwrap_or_else(|| format!("{}/.fastembed_cache", std::env::var("HOME").unwrap()).into());
     // let model_path = "/Users/fyyx/Documents/rust_projects/rust-mcp-demo/~/.fastembed_cache";
-    Arc::new(TextEmbedding::try_new(
-        InitOptions::new(EmbeddingModel::AllMiniLML6V2)
-            .with_cache_dir(model_path.into())
-            .with_show_download_progress(true),
-    ).unwrap())
+    Arc::new(
+        TextEmbedding::try_new(
+            InitOptions::new(EmbeddingModel::AllMiniLML6V2)
+                .with_cache_dir(model_path.into())
+                .with_show_download_progress(true),
+        )
+        .unwrap(),
+    )
 });
 
 #[derive(Parser, Debug)]
@@ -57,9 +70,12 @@ enum Commands {
 }
 
 #[tokio::main]
-async fn main () -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let database_url = args.database_url.clone().unwrap_or(format!("{}/.laravel_docs.db3", std::env::var("HOME").unwrap()));
+    let database_url = args.database_url.clone().unwrap_or(format!(
+        "{}/.laravel_docs.db3",
+        std::env::var("HOME").unwrap()
+    ));
     // let database_url = "/Users/fyyx/Documents/rust_projects/rust-mcp-demo/aa.db3".to_owned();
     if let Some(command) = args.command {
         match command {
@@ -77,12 +93,11 @@ async fn main () -> Result<(), Box<dyn std::error::Error>> {
 async fn start_stdio(database_url: &str) -> Result<(), Box<dyn std::error::Error>> {
     let service = LaravelDocs::new(database_url);
     service.serve(stdio()).await?.waiting().await?;
-    
+
     Ok(())
 }
 
 async fn start_sse(database_url: &str, port: u16) -> Result<(), Box<dyn std::error::Error>> {
-
     let mut data_path: PathBuf = database_url.into();
     let log_path = format!("{}/mcp_service.log", {
         data_path.pop();
@@ -93,7 +108,7 @@ async fn start_sse(database_url: &str, port: u16) -> Result<(), Box<dyn std::err
         .create(true)
         .append(true)
         .open(log_path)?;
-    
+
     let _ = MODEL.clone();
     println!("model load");
 
@@ -123,7 +138,6 @@ async fn start_sse(database_url: &str, port: u16) -> Result<(), Box<dyn std::err
 
     let service_ct = sse_server.with_service(move || LaravelDocs::new(&db_path_owned));
 
-
     tokio::signal::ctrl_c().await?;
     tracing::info!("Ctrl-C received, shutting down...");
     service_ct.cancel();
@@ -145,7 +159,7 @@ impl log::Log for FileLogger {
         if self.enabled(record.metadata()) {
             let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
             let log_line = format!("[{}] {} - {}\n", timestamp, record.level(), record.args());
-            
+
             if let Ok(mut file) = self.file.lock() {
                 let _ = file.write_all(log_line.as_bytes());
                 let _ = file.flush();
@@ -191,7 +205,6 @@ impl log::Log for FileLogger {
 //     };
 // }
 
-
 #[derive(Clone)]
 pub struct LaravelDocs {
     db_path: String,
@@ -206,54 +219,63 @@ pub struct LaravelResult {
 #[tool(tool_box)]
 impl LaravelDocs {
     pub fn new(db_path: &str) -> Self {
-        Self { db_path: db_path.to_string(), vectorizers: Arc::new(RwLock::new(HashMap::new())) }
+        Self {
+            db_path: db_path.to_string(),
+            vectorizers: Arc::new(RwLock::new(HashMap::new())),
+        }
     }
 
-    async fn get_vectorizer(&self, collection: &str) -> anyhow::Result<Arc<Vectorizer>> {    
+    async fn get_vectorizer(&self, collection: &str) -> anyhow::Result<Arc<Vectorizer>> {
         {
             let vectorizers = self.vectorizers.read().await;
             if let Some(v) = vectorizers.get(collection) {
                 return Ok(v.clone());
             }
         }
-        
+
         //  TODO 这里还有并发漏洞之后处理
         let v = match Vectorizer::new(&self.db_path, collection, 384, MODEL.clone()) {
             Ok(v) => Arc::new(v),
             Err(e) => {
                 println!("{:?}", e);
                 return Err(e);
-            },
+            }
         };
-    
+
         let mut vectorizers = self.vectorizers.write().await;
-        let entry = vectorizers.entry(collection.to_string()).or_insert_with(|| v.clone());
-    
+        let entry = vectorizers
+            .entry(collection.to_string())
+            .or_insert_with(|| v.clone());
+
         Ok(entry.clone())
     }
 
-    #[tool(name = "get_laravel_context", description = "有关laravel框架的问题 都先调用 get_laravel_context 这里的文档是最新的")]
+    #[tool(
+        name = "get_laravel_context",
+        description = "有关laravel框架的问题 都先调用 get_laravel_context 这里的文档是最新的"
+    )]
     async fn get_laravel_context(&self, #[tool(param)] query: String) -> AppResultWrapper {
         log::info!("Received query: {}", query);
         let vector = match self.get_vectorizer("laravel_docs").await {
             Ok(v) => v,
             Err(e) => {
                 println!("{:?}", e);
-                return AppResultWrapper(Err(e.into()))
-            },
+                return AppResultWrapper(Err(e.into()));
+            }
         };
         let results = match vector.search(&query, Some(20)) {
             Ok(r) => r,
             Err(e) => {
                 println!("{:?}", e);
-                return AppResultWrapper(Err(e.into()))
-            },
+                return AppResultWrapper(Err(e.into()));
+            }
         };
         let docs = parse_docs(results);
         if docs.is_empty() {
-            return AppResultWrapper(Ok(CallToolResult::success(vec![
-                Content::text(format!("No relevant {} documentation found for the query.", "laravel_docs")),
-            ])));
+            return AppResultWrapper(Ok(CallToolResult::success(vec![Content::text(format!(
+                "No relevant {} documentation found for the query.",
+                "laravel_docs"
+            ))])));
         }
         let content = match Content::json(&LaravelResult { documents: docs }) {
             Ok(c) => c,
@@ -262,7 +284,10 @@ impl LaravelDocs {
         AppResultWrapper(Ok(CallToolResult::success(vec![content])))
     }
 
-    #[tool(name = "get_laravel_livewire_context", description = "有关laravel livewire 框架的问题 都先调用 get_laravel_livewire_context 这里的文档是最新的")]
+    #[tool(
+        name = "get_laravel_livewire_context",
+        description = "有关laravel livewire 框架的问题 都先调用 get_laravel_livewire_context 这里的文档是最新的"
+    )]
     async fn get_laravel_livewire_context(&self, #[tool(param)] query: String) -> AppResultWrapper {
         log::info!("Received query: {}", query);
         let vector = match self.get_vectorizer("laravel_livewire_docs").await {
@@ -275,9 +300,39 @@ impl LaravelDocs {
         };
         let docs = parse_docs(results);
         if docs.is_empty() {
-            return AppResultWrapper(Ok(CallToolResult::success(vec![
-                Content::text(format!("No relevant {} documentation found for the query.", "laravel_livewire_docs")),
-            ])));
+            return AppResultWrapper(Ok(CallToolResult::success(vec![Content::text(format!(
+                "No relevant {} documentation found for the query.",
+                "laravel_livewire_docs"
+            ))])));
+        }
+        let content = match Content::json(&LaravelResult { documents: docs }) {
+            Ok(c) => c,
+            Err(e) => return AppResultWrapper(Err(AppError::InternalServerError(e.to_string()))),
+        };
+        AppResultWrapper(Ok(CallToolResult::success(vec![content])))
+    }
+
+
+    #[tool(
+        name = "get_pingora_context",
+        description = "有关pingora 框架的问题 都先调用 get_pingora_context 这里的文档是最新的"
+    )]
+    async fn get_pingora_context(&self, #[tool(param)] query: String) -> AppResultWrapper {
+        log::info!("Received query: {}", query);
+        let vector = match self.get_vectorizer("pingora_docs").await {
+            Ok(v) => v,
+            Err(e) => return AppResultWrapper(Err(e.into())),
+        };
+        let results = match vector.search(&query, Some(20)) {
+            Ok(r) => r,
+            Err(e) => return AppResultWrapper(Err(e.into())),
+        };
+        let docs = parse_docs(results);
+        if docs.is_empty() {
+            return AppResultWrapper(Ok(CallToolResult::success(vec![Content::text(format!(
+                "No relevant {} documentation found for the query.",
+                "pingora_docs"
+            ))])));
         }
         let content = match Content::json(&LaravelResult { documents: docs }) {
             Ok(c) => c,
@@ -301,14 +356,17 @@ impl ServerHandler for LaravelDocs {
 }
 
 fn parse_docs(results: Vec<(i64, Option<String>)>) -> Vec<String> {
-    results.into_iter().filter_map(|(_, text)| {
-        text.and_then(|t| {
-            serde_json::from_str::<serde_json::Value>(&t).ok()
-                .and_then(|json| json.get("text")?.as_str().map(|s| s.to_string()))
+    results
+        .into_iter()
+        .filter_map(|(_, text)| {
+            text.and_then(|t| {
+                serde_json::from_str::<serde_json::Value>(&t)
+                    .ok()
+                    .and_then(|json| json.get("text")?.as_str().map(|s| s.to_string()))
+            })
         })
-    }).collect()
+        .collect()
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -318,12 +376,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_laravel_context() {
-        let _ = MODEL.clone();           // force the LazyLock init
+        let _ = MODEL.clone(); // force the LazyLock init
 
         // Construct a real Vectorizer and inject into service
         let vectorizer = Vectorizer::new("./test.db3", "test_docs", 384, MODEL.clone()).unwrap();
         let docs = LaravelDocs::new("./test.db3");
-        docs.vectorizers.write().await.insert("test_docs".to_string(), Arc::new(vectorizer));
+        docs.vectorizers
+            .write()
+            .await
+            .insert("test_docs".to_string(), Arc::new(vectorizer));
         let query = "model".to_string();
         let result = docs.get_laravel_context(query).await;
         // Assert the call result is OK and has output
