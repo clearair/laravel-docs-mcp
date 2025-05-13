@@ -340,6 +340,62 @@ impl LaravelDocs {
         };
         AppResultWrapper(Ok(CallToolResult::success(vec![content])))
     }
+
+    #[tool(
+        name = "get_phper_context",
+        description = "有关phper 框架的问题 都先调用 get_phper_context 这里的文档是最新的"
+    )]
+    async fn get_phper_context(&self, #[tool(param)] query: String) -> AppResultWrapper {
+        log::info!("Received query: {}", query);
+        let vector = match self.get_vectorizer("phper_docs").await {
+            Ok(v) => v,
+            Err(e) => return AppResultWrapper(Err(e.into())),
+        };
+        let results = match vector.search(&query, Some(20)) {
+            Ok(r) => r,
+            Err(e) => return AppResultWrapper(Err(e.into())),
+        };
+        let docs = parse_docs(results);
+        if docs.is_empty() {
+            return AppResultWrapper(Ok(CallToolResult::success(vec![Content::text(format!(
+                "No relevant {} documentation found for the query.",
+                "phper_docs"
+            ))])));
+        }
+        let content = match Content::json(&LaravelResult { documents: docs }) {
+            Ok(c) => c,
+            Err(e) => return AppResultWrapper(Err(AppError::InternalServerError(e.to_string()))),
+        };
+        AppResultWrapper(Ok(CallToolResult::success(vec![content])))
+    }
+
+    #[tool(
+        name = "get_laravel_comments_context",
+        description = "有关laravel_comments 库的问题 都先调用 get_laravel_comments_context 这里的文档是最新的"
+    )]
+    async fn get_laravel_comments_context(&self, #[tool(param)] query: String) -> AppResultWrapper {
+        log::info!("Received query: {}", query);
+        let vector = match self.get_vectorizer("laravel_comments_docs").await {
+            Ok(v) => v,
+            Err(e) => return AppResultWrapper(Err(e.into())),
+        };
+        let results = match vector.search(&query, Some(20)) {
+            Ok(r) => r,
+            Err(e) => return AppResultWrapper(Err(e.into())),
+        };
+        let docs = parse_docs(results);
+        if docs.is_empty() {
+            return AppResultWrapper(Ok(CallToolResult::success(vec![Content::text(format!(
+                "No relevant {} documentation found for the query.",
+                "laravel_comments_docs"
+            ))])));
+        }
+        let content = match Content::json(&LaravelResult { documents: docs }) {
+            Ok(c) => c,
+            Err(e) => return AppResultWrapper(Err(AppError::InternalServerError(e.to_string()))),
+        };
+        AppResultWrapper(Ok(CallToolResult::success(vec![content])))
+    }
 }
 
 #[tool(tool_box)]

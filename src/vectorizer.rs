@@ -366,7 +366,7 @@ mod tests {
             "fastembed-rs is licensed under Apache  2.0",
         ];
 
-        let file = File::open("/Users/fyyx/Documents/rust_projects/rust-mcp-demo/artifacts/chunks/docs_chunks_SZ_400_O_20.jsonl").unwrap();
+        let file = File::open("/Users/fyyx/Documents/rust_projects/rust-mcp-demo/artifacts/chunks/laravel-comments-documentation_chunks_SZ_400_O_20.jsonl").unwrap();
         let reader = io::BufReader::new(file);
         let documents: Vec<String> = reader.lines().collect::<Result<_, _>>().unwrap();
         let documents = documents.iter().map(|i| i.as_str()).collect::<Vec<&str>>();
@@ -378,7 +378,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let mut vector = Vectorizer::new("./aa.db3", "pingora_docs", 384, model).unwrap();
+        let mut vector = Vectorizer::new("./aa.db3", "laravel_comments_docs", 384, model).unwrap();
         vector.clean().unwrap();
         vector.create_table().unwrap();
         vector.store_docs(documents.clone()).unwrap();
